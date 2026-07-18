@@ -2,6 +2,10 @@
 FY 2026 GAA — Production-Ready Streamlit Dashboard
 Data Science Workshop | KIRO
 Reads from optimized_gaa_2026.parquet (10.5 MB) — no CSV needed.
+
+Caching strategy:
+  @st.cache_data  → aggregated DataFrames only (pickle-safe)
+  No cache        → matplotlib Figure objects (not picklable)
 """
 
 import streamlit as st
@@ -58,16 +62,7 @@ plt.rcParams.update({
     'font.size'         : 10,
 })
 
-# ── Data Loader ────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Loading FY 2026 GAA dataset...")
-def load_data():
-    df = pd.read_parquet('optimized_gaa_2026.parquet')
-    return df
-
-df = load_data()
-grand_total_b = df['AMT'].sum() / 1e9
-
-# ── Label Maps (module-level so charts can reference them) ─────────
+# ── Label Maps ────────────────────────────────────────────────────
 DEPT_LABEL_MAP = {
     'AUTOMATIC APPROPRIATIONS'                                   : 'Automatic Appropriations',
     'DEPARTMENT OF EDUCATION (DEPED)'                           : 'DepEd',
@@ -87,21 +82,86 @@ EXP_LABEL_MAP = {
     'FINANCIAL EXPENSES'                       : 'Financial Expenses',
 }
 REGION_MAP = {
-    1.0 : 'Region I (Ilocos)',           2.0 : 'Region II (Cagayan Valley)',
-    3.0 : 'Region III (Central Luzon)',  4.0 : 'Region IV (CALABARZON)',
-    5.0 : 'Region V (Bicol)',            6.0 : 'Region VI (Western Visayas)',
-    7.0 : 'Region VII (Central Visayas)',8.0 : 'Region VIII (Eastern Visayas)',
-    9.0 : 'Region IX (Zamboanga)',       10.0: 'Region X (Northern Mindanao)',
-    11.0: 'Region XI (Davao)',           12.0: 'Region XII (SOCCSKSARGEN)',
-    13.0: 'NCR (Metro Manila)',          14.0: 'CAR (Cordillera)',
-    16.0: 'Region XIII (CARAGA)',        17.0: 'MIMAROPA',
-    18.0: 'BARMM',                       19.0: 'Nationwide / Multi-Region',
+    1.0 : 'Region I (Ilocos)',            2.0 : 'Region II (Cagayan Valley)',
+    3.0 : 'Region III (Central Luzon)',   4.0 : 'Region IV (CALABARZON)',
+    5.0 : 'Region V (Bicol)',             6.0 : 'Region VI (Western Visayas)',
+    7.0 : 'Region VII (Central Visayas)', 8.0 : 'Region VIII (Eastern Visayas)',
+    9.0 : 'Region IX (Zamboanga)',        10.0: 'Region X (Northern Mindanao)',
+    11.0: 'Region XI (Davao)',            12.0: 'Region XII (SOCCSKSARGEN)',
+    13.0: 'NCR (Metro Manila)',           14.0: 'CAR (Cordillera)',
+    16.0: 'Region XIII (CARAGA)',         17.0: 'MIMAROPA',
+    18.0: 'BARMM',                        19.0: 'Nationwide / Multi-Region',
     0.0 : 'National / Central Office',
 }
 EXCL_FUNDS = [
     'Specific Budgets of National Government Agencies',
     'Retirement and Life Insurance Premiums'
 ]
+
+# ══════════════════════════════════════════════════════════════════
+# CACHED DATA LOADERS — DataFrames only (pickle-safe)
+# Figures are built directly from these; no cache on figure functions
+# ══════════════════════════════════════════════════════════════════
+
+@st.cache_data(show_spinner="Loading FY 2026 GAA dataset...")
+def load_data():
+    return pd.read_parquet('optimized_gaa_2026.parquet')
+
+@st.cache_data
+def get_top10(df):
+    top10 = (
+        df.groupby('UACS_DPT_DSC', observed=True)['AMT']
+        .sum().sort_values(ascending=False).head(10).reset_index()
+    )
+    top10.columns = ['DEPARTMENT', 'TOTAL_AMT']
+    top10['TOTAL_B'] = top10['TOTAL_AMT'] / 1e9
+    top10['LABEL']   = top10['DEPARTMENT'].map(DEPT_LABEL_MAP).fillna(top10['DEPARTMENT'])
+    return top10.sort_values('TOTAL_B', ascending=True).reset_index(drop=True)
+
+@st.cache_data
+def get_exp_data(df):
+    exp = (
+        df[df['UACS_EXP_DSC'].notna()]
+        .groupby('UACS_EXP_DSC', observed=True)['AMT']
+        .sum().sort_values(ascending=False).reset_index()
+    )
+    exp.columns = ['CATEGORY', 'TOTAL']
+    exp['SHORT'] = exp['CATEGORY'].map(EXP_LABEL_MAP).fillna(exp['CATEGORY'])
+    return exp.reset_index(drop=True)
+
+@st.cache_data
+def get_reg_data(df):
+    reg = (
+        df.groupby('UACS_REG_ID')['AMT']
+        .sum().reset_index()
+        .rename(columns={'UACS_REG_ID': 'REG_ID', 'AMT': 'TOTAL'})
+    )
+    reg['REGION']  = reg['REG_ID'].map(REGION_MAP).fillna(reg['REG_ID'].astype(str))
+    reg['TOTAL_B'] = reg['TOTAL'] / 1e9
+    return reg.sort_values('TOTAL_B', ascending=True).reset_index(drop=True)
+
+@st.cache_data
+def get_special_funds(df):
+    special = df[
+        df['UACS_FUNDSUBCAT_DSC'].notna() &
+        ~df['UACS_FUNDSUBCAT_DSC'].isin(EXCL_FUNDS)
+    ]
+    sp = (
+        special.groupby('UACS_FUNDSUBCAT_DSC', observed=True)['AMT']
+        .sum().sort_values(ascending=False).head(12).reset_index()
+    )
+    sp.columns = ['FUND', 'TOTAL']
+    sp['TOTAL_B']    = sp['TOTAL'] / 1e9
+    sp['FUND_SHORT'] = sp['FUND'].str[:55]
+    return sp.sort_values('TOTAL_B', ascending=True).reset_index(drop=True)
+
+# ── Load everything ────────────────────────────────────────────────
+df          = load_data()
+top10       = get_top10(df)
+exp_data    = get_exp_data(df)
+reg_data    = get_reg_data(df)
+sp_data     = get_special_funds(df)
+grand_total_b = df['AMT'].sum() / 1e9
 
 # ── Sidebar ────────────────────────────────────────────────────────
 with st.sidebar:
@@ -112,15 +172,6 @@ with st.sidebar:
     st.metric("Budget Line Items",     f"{len(df):,}")
     st.metric("Departments",           f"{df['UACS_DPT_DSC'].nunique()}")
     st.metric("Agencies",              f"{df['UACS_AGY_DSC'].nunique()}")
-    st.divider()
-    st.markdown("**Navigation**")
-    section = st.radio("Jump to section:", [
-        "📊 Top 10 Departments",
-        "🍩 Budget Composition",
-        "🗺️ Regional Allocation",
-        "💰 Special Funds",
-        "🧠 Macro Insights",
-    ])
     st.divider()
     st.caption("Data Engineering: ✅ Cleaned & Optimized")
     st.caption("Workshop · KIRO · 2026")
@@ -156,46 +207,36 @@ st.info(
     "the top two reveals severe fiscal compression across mid-tier agencies."
 )
 
-@st.cache_data
-def build_chart1(_df):
-    top10 = (
-        _df.groupby('UACS_DPT_DSC', observed=True)['AMT']
-        .sum().sort_values(ascending=False).head(10).reset_index()
-    )
-    top10.columns = ['DEPARTMENT', 'TOTAL_AMT']
-    top10['TOTAL_B'] = top10['TOTAL_AMT'] / 1e9
-    top10['LABEL'] = top10['DEPARTMENT'].map(DEPT_LABEL_MAP).fillna(top10['DEPARTMENT'])
-    top10 = top10.sort_values('TOTAL_B', ascending=True)
-
+# No @st.cache_data — matplotlib Figure is not picklable
+def build_chart1(data, total_b):
     fig, ax = plt.subplots(figsize=(11, 6.5))
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(PANEL_COLOR)
-    bars = ax.barh(top10['LABEL'], top10['TOTAL_B'],
+
+    bars = ax.barh(data['LABEL'], data['TOTAL_B'],
                    color=NAVY_PALETTE[::-1][:10], height=0.65, edgecolor='none')
     bars[-1].set_color(ACCENT)
 
-    for bar, val in zip(bars, top10['TOTAL_B']):
+    for bar, val in zip(bars, data['TOTAL_B']):
         ax.text(bar.get_width() + 0.02, bar.get_y() + bar.get_height() / 2,
                 f'₱{val:.2f}B', va='center', ha='left',
                 fontsize=9.5, fontweight='bold', color=TEXT_DARK)
 
-    ax.set_xlabel('Total Budget Allocation (₱ Billions)', fontsize=10,
-                  color=TEXT_MID, labelpad=8)
-    ax.set_title(
-        'Top 10 Departments by Budget Allocation\nFY 2026 General Appropriations Act',
-        fontsize=14, fontweight='bold', color=TEXT_DARK, pad=15, loc='left'
-    )
+    ax.set_xlabel('Total Budget Allocation (₱ Billions)', fontsize=10, color=TEXT_MID, labelpad=8)
+    ax.set_title('Top 10 Departments by Budget Allocation\nFY 2026 General Appropriations Act',
+                 fontsize=14, fontweight='bold', color=TEXT_DARK, pad=15, loc='left')
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'₱{x:.0f}B'))
-    ax.set_xlim(0, top10['TOTAL_B'].max() * 1.22)
+    ax.set_xlim(0, data['TOTAL_B'].max() * 1.22)
     ax.tick_params(axis='y', labelsize=9.5)
     ax.tick_params(axis='x', labelsize=9)
     ax.spines['bottom'].set_color('#CCCCCC')
-    fig.text(0.98, 0.02, f'Grand Total: ₱{_df["AMT"].sum()/1e9:.2f}B',
+    fig.text(0.98, 0.02, f'Grand Total: ₱{total_b:.2f}B',
              ha='right', va='bottom', fontsize=8.5, color=TEXT_MID, style='italic')
     plt.tight_layout()
     return fig
 
-st.pyplot(build_chart1(df), use_container_width=True)
+st.pyplot(build_chart1(top10, grand_total_b), use_container_width=True)
+plt.close('all')
 st.divider()
 
 # ══════════════════════════════════════════════════════════════════
@@ -210,23 +251,14 @@ st.info(
     "productive investment."
 )
 
-@st.cache_data
-def build_chart2(_df):
-    exp_data = (
-        _df[_df['UACS_EXP_DSC'].notna()]
-        .groupby('UACS_EXP_DSC', observed=True)['AMT']
-        .sum().sort_values(ascending=False).reset_index()
-    )
-    exp_data.columns = ['CATEGORY', 'TOTAL']
-    exp_data['SHORT'] = exp_data['CATEGORY'].map(EXP_LABEL_MAP).fillna(exp_data['CATEGORY'])
-    total_b = exp_data['TOTAL'].sum() / 1e9
-
+def build_chart2(data):
+    total_b = data['TOTAL'].sum() / 1e9
     fig, ax = plt.subplots(figsize=(9, 7))
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(BG_COLOR)
 
     ax.pie(
-        exp_data['TOTAL'], labels=None, autopct='%1.1f%%',
+        data['TOTAL'], labels=None, autopct='%1.1f%%',
         startangle=90, colors=DONUT_COLORS,
         wedgeprops=dict(width=0.5, edgecolor='white', linewidth=2.5),
         pctdistance=0.78,
@@ -236,29 +268,29 @@ def build_chart2(_df):
     ax.text(0, -0.18, f'₱{total_b:.2f}B',  ha='center', fontsize=18,
             fontweight='bold', color=TEXT_DARK)
 
-    patches = [mpatches.Patch(color=DONUT_COLORS[i],
-               label=f"{row['SHORT']}  —  ₱{row['TOTAL']/1e9:.2f}B")
-               for i, (_, row) in enumerate(exp_data.iterrows())]
+    patches = [
+        mpatches.Patch(color=DONUT_COLORS[i],
+                       label=f"{row['SHORT']}  —  ₱{row['TOTAL']/1e9:.2f}B")
+        for i, (_, row) in enumerate(data.iterrows())
+    ]
     ax.legend(handles=patches, loc='lower center', bbox_to_anchor=(0.5, -0.12),
               ncol=2, frameon=False, fontsize=9.5, labelcolor=TEXT_DARK)
-    ax.set_title(
-        'National Budget Composition by Expense Category\nFY 2026 GAA',
-        fontsize=14, fontweight='bold', color=TEXT_DARK, pad=18
-    )
+    ax.set_title('National Budget Composition by Expense Category\nFY 2026 GAA',
+                 fontsize=14, fontweight='bold', color=TEXT_DARK, pad=18)
     plt.tight_layout()
-    return fig, exp_data
+    return fig
 
-fig2, exp_data = build_chart2(df)
 col_a, col_b = st.columns([1.2, 1])
 with col_a:
-    st.pyplot(fig2, use_container_width=True)
+    st.pyplot(build_chart2(exp_data), use_container_width=True)
+    plt.close('all')
 with col_b:
     st.markdown("#### Expense Category Breakdown")
-    tbl = exp_data.copy()
-    tbl['Short Name']  = tbl['CATEGORY'].map(EXP_LABEL_MAP).fillna(tbl['CATEGORY'])
-    tbl['Total (₱B)']  = (tbl['TOTAL'] / 1e9).round(3)
-    tbl['Share (%)']   = (tbl['TOTAL'] / tbl['TOTAL'].sum() * 100).round(1)
-    st.dataframe(tbl[['Short Name','Total (₱B)','Share (%)']].reset_index(drop=True),
+    tbl2 = exp_data.copy()
+    tbl2['Short Name'] = tbl2['CATEGORY'].map(EXP_LABEL_MAP).fillna(tbl2['CATEGORY'])
+    tbl2['Total (₱B)'] = (tbl2['TOTAL'] / 1e9).round(3)
+    tbl2['Share (%)']  = (tbl2['TOTAL'] / tbl2['TOTAL'].sum() * 100).round(1)
+    st.dataframe(tbl2[['Short Name','Total (₱B)','Share (%)']].reset_index(drop=True),
                  use_container_width=True, hide_index=True)
 st.divider()
 
@@ -273,19 +305,9 @@ st.info(
     "sit at the bottom, raising structural equity questions about regional development commitments."
 )
 
-@st.cache_data
-def build_chart3(_df):
-    reg = (
-        _df.groupby('UACS_REG_ID')['AMT']
-        .sum().reset_index()
-        .rename(columns={'UACS_REG_ID': 'REG_ID', 'AMT': 'TOTAL'})
-    )
-    reg['REGION']  = reg['REG_ID'].map(REGION_MAP).fillna(reg['REG_ID'].astype(str))
-    reg['TOTAL_B'] = reg['TOTAL'] / 1e9
-    reg = reg.sort_values('TOTAL_B', ascending=True)
-
+def build_chart3(data):
     bar_colors = []
-    for _, row in reg.iterrows():
+    for _, row in data.iterrows():
         if 'NCR' in str(row['REGION']):        bar_colors.append(ACCENT)
         elif 'National' in str(row['REGION']): bar_colors.append('#0D2137')
         else:                                  bar_colors.append('#2E86C1')
@@ -293,22 +315,18 @@ def build_chart3(_df):
     fig, ax = plt.subplots(figsize=(11, 8))
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(PANEL_COLOR)
-    bars = ax.barh(reg['REGION'], reg['TOTAL_B'],
-                   color=bar_colors, height=0.65, edgecolor='none')
+    ax.barh(data['REGION'], data['TOTAL_B'], color=bar_colors, height=0.65, edgecolor='none')
 
-    for bar, val in zip(bars, reg['TOTAL_B']):
-        ax.text(bar.get_width() + 0.02, bar.get_y() + bar.get_height() / 2,
-                f'₱{val:.2f}B', va='center', ha='left',
+    for _, row in data.iterrows():
+        ax.text(row['TOTAL_B'] + 0.02, data.index.get_loc(_),
+                f'₱{row["TOTAL_B"]:.2f}B', va='center', ha='left',
                 fontsize=8.5, fontweight='bold', color=TEXT_DARK)
 
-    ax.set_xlabel('Total Budget Allocation (₱ Billions)', fontsize=10,
-                  color=TEXT_MID, labelpad=8)
-    ax.set_title(
-        'Regional Budget Allocation Distribution\nFY 2026 General Appropriations Act',
-        fontsize=14, fontweight='bold', color=TEXT_DARK, pad=15, loc='left'
-    )
+    ax.set_xlabel('Total Budget Allocation (₱ Billions)', fontsize=10, color=TEXT_MID, labelpad=8)
+    ax.set_title('Regional Budget Allocation Distribution\nFY 2026 General Appropriations Act',
+                 fontsize=14, fontweight='bold', color=TEXT_DARK, pad=15, loc='left')
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'₱{x:.0f}B'))
-    ax.set_xlim(0, reg['TOTAL_B'].max() * 1.22)
+    ax.set_xlim(0, data['TOTAL_B'].max() * 1.22)
     ax.tick_params(axis='y', labelsize=8.5)
     ax.spines['bottom'].set_color('#CCCCCC')
     legend3 = [
@@ -320,7 +338,8 @@ def build_chart3(_df):
     plt.tight_layout()
     return fig
 
-st.pyplot(build_chart3(df), use_container_width=True)
+st.pyplot(build_chart3(reg_data), use_container_width=True)
+plt.close('all')
 st.divider()
 
 # ══════════════════════════════════════════════════════════════════
@@ -335,53 +354,37 @@ st.info(
     "narrowing the government's room for discretionary reallocation."
 )
 
-@st.cache_data
-def build_chart4(_df):
-    special = _df[
-        _df['UACS_FUNDSUBCAT_DSC'].notna() &
-        ~_df['UACS_FUNDSUBCAT_DSC'].isin(EXCL_FUNDS)
-    ]
-    sp_agg = (
-        special.groupby('UACS_FUNDSUBCAT_DSC', observed=True)['AMT']
-        .sum().sort_values(ascending=False).head(12).reset_index()
-    )
-    sp_agg.columns = ['FUND', 'TOTAL']
-    sp_agg['TOTAL_B']    = sp_agg['TOTAL'] / 1e9
-    sp_agg['FUND_SHORT'] = sp_agg['FUND'].str[:55]
-    sp_agg = sp_agg.sort_values('TOTAL_B', ascending=True)
-
+def build_chart4(data):
     fig, ax = plt.subplots(figsize=(11, 7))
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(PANEL_COLOR)
-    ax.barh(sp_agg['FUND_SHORT'], sp_agg['TOTAL_B'],
-            color=TEAL_PALETTE[:len(sp_agg)], height=0.65, edgecolor='none')
+    ax.barh(data['FUND_SHORT'], data['TOTAL_B'],
+            color=TEAL_PALETTE[:len(data)], height=0.65, edgecolor='none')
 
-    for _, row in sp_agg.iterrows():
-        ax.text(row['TOTAL_B'] + 0.005, sp_agg.index.get_loc(_) * 1,
+    for i, (_, row) in enumerate(data.iterrows()):
+        ax.text(row['TOTAL_B'] + 0.005, i,
                 f'₱{row["TOTAL_B"]:.3f}B', va='center', ha='left',
                 fontsize=8.5, fontweight='bold', color=TEXT_DARK)
 
     ax.set_xlabel('Total Allocation (₱ Billions)', fontsize=10, color=TEXT_MID, labelpad=8)
-    ax.set_title(
-        'Special Funds & Unprogrammed Allocations\nFY 2026 General Appropriations Act',
-        fontsize=14, fontweight='bold', color=TEXT_DARK, pad=15, loc='left'
-    )
+    ax.set_title('Special Funds & Unprogrammed Allocations\nFY 2026 General Appropriations Act',
+                 fontsize=14, fontweight='bold', color=TEXT_DARK, pad=15, loc='left')
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'₱{x:.2f}B'))
-    ax.set_xlim(0, sp_agg['TOTAL_B'].max() * 1.30)
+    ax.set_xlim(0, data['TOTAL_B'].max() * 1.30)
     ax.tick_params(axis='y', labelsize=8.5)
     ax.spines['bottom'].set_color('#CCCCCC')
-    fig.text(0.98, 0.02, f'Special Funds Total: ₱{sp_agg["TOTAL"].sum()/1e9:.3f}B',
+    fig.text(0.98, 0.02, f'Special Funds Total: ₱{data["TOTAL"].sum()/1e9:.3f}B',
              ha='right', va='bottom', fontsize=8.5, color=TEXT_MID, style='italic')
     plt.tight_layout()
-    return fig, sp_agg
+    return fig
 
-fig4, sp_agg = build_chart4(df)
 col_c, col_d = st.columns([1.3, 1])
 with col_c:
-    st.pyplot(fig4, use_container_width=True)
+    st.pyplot(build_chart4(sp_data), use_container_width=True)
+    plt.close('all')
 with col_d:
     st.markdown("#### Top Special Fund Categories")
-    tbl4 = sp_agg[['FUND','TOTAL']].copy()
+    tbl4 = sp_data[['FUND','TOTAL']].copy()
     tbl4.columns = ['Fund / Program', 'Total Amount']
     tbl4['Total (₱B)'] = (tbl4['Total Amount'] / 1e9).round(4)
     tbl4['Share (%)']  = (tbl4['Total Amount'] / tbl4['Total Amount'].sum() * 100).round(1)
@@ -439,7 +442,6 @@ st.dataframe(
     top5[['Department','Total (₱B)','Budget Share (%)','Cumulative (%)']].reset_index(drop=True),
     use_container_width=True, hide_index=True
 )
-
 st.divider()
 
 # ── Footer ─────────────────────────────────────────────────────────
