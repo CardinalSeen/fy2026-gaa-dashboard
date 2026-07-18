@@ -1,0 +1,24 @@
+# Large raw data files — too big for GitHub
+FY2026_GAA.xlsx
+cleaned_gaa_2026.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Chart image exports (generated at runtime)
+chart1_top10_departments.png
+chart2_budget_composition.png
+chart3_regional_allocation.png
+chart4_special_funds.png
